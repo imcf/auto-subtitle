@@ -3,9 +3,19 @@ import subprocess
 import ffmpeg
 import whisper
 import argparse
+import shlex
+import shutil
+import sys
 import warnings
 import tempfile
-from typing import Dict, Any, Callable
+from typing import Dict, Any, Callable, Optional
+from .ffmpeg_utils import (
+    add_subtitles_to_video,
+    _ffmpeg_supports_subtitles,
+    _run_ffmpeg_and_log,
+    _run_ffmpeg_cli_and_log,
+    _quote_for_ffmpeg_filter,
+)
 from pathlib import Path
 from .utils import filename, str2bool, write_srt
 
@@ -13,8 +23,12 @@ from .utils import filename, str2bool, write_srt
 def main():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("video", nargs="+", type=str,
+    parser.add_argument("video", nargs="*", type=str,
                         help="paths to video files to transcribe")
+    parser.add_argument("--input_dir", type=str, default=None,
+                        help="Directory containing video files to process in batch")
+    parser.add_argument("--recursive", action='store_true', default=False,
+                        help="Recursively scan input_dir for video files")
     parser.add_argument("--model", default="small",
                         choices=whisper.available_models(), help="name of the Whisper model to use")
     parser.add_argument("--output_dir", "-o", type=str,
@@ -35,6 +49,16 @@ def main():
                         help="Minimum duration (seconds) per subtitle entry; too-short segments are merged.")
     parser.add_argument("--verbose", type=str2bool, default=False,
                         help="whether to print out the progress and debug messages")
+    parser.add_argument("--edit_srt", type=str2bool, default=False,
+                        help="Open generated SRT files for manual editing before burning/embedding.")
+    parser.add_argument("--editor", type=str, default=None,
+                        help="Editor command to use for editing SRT files. Can include args, e.g. 'code --wait'.")
+    parser.add_argument("--batch", action='store_true', default=False,
+                        help="After generating SRTs, run burn on all files in batch mode (non-interactive)")
+    parser.add_argument("--gui", type=str2bool, default=False,
+                        help="Open a local web GUI allowing subtitle editing while previewing the video")
+    parser.add_argument("--gui_port", type=int, default=5000,
+                        help="Port for the local GUI server")
 
     parser.add_argument("--task", type=str, default="transcribe", choices=[
                         "transcribe", "translate"], help="whether to perform X->X speech recognition ('transcribe') or X->English translation ('translate')")
@@ -49,6 +73,11 @@ def main():
     language: str = args.pop("language")
     verbose: bool = args.pop("verbose")
     subtitle_mode: str = args.pop("subtitle_mode")
+    edit_srt: bool = args.pop("edit_srt")
+    editor_cmd: str | None = args.pop("editor")
+    gui_enabled: bool = args.pop("gui")
+    gui_port: int = args.pop("gui_port")
+    batch_mode: bool = args.pop("batch")
     max_chars = args.pop("max_chars_per_line")
     max_lines = args.pop("max_lines")
     max_sub_duration = args.pop("max_sub_duration")
@@ -65,13 +94,55 @@ def main():
         args["language"] = language
 
     model = whisper.load_model(model_name)
-    audios = get_audio(args.pop("video"))
+    videos = args.pop("video")
+    input_dir = args.pop("input_dir")
+    recursive = args.pop("recursive")
+    if input_dir:
+        # scan for supported extensions
+        from pathlib import Path
+        exts = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".mpg", ".mpeg", ".m4v"}
+        p = Path(input_dir)
+        if recursive:
+            vids = [str(x) for x in p.rglob("*") if x.suffix.lower() in exts]
+        else:
+            vids = [str(x) for x in p.iterdir() if x.suffix.lower() in exts]
+        videos = vids
+    if not videos:
+        raise ValueError("No videos provided or found in input_dir")
+    audios = get_audio(videos)
     subtitles = get_subtitles(
         audios, output_srt or srt_only, output_dir, lambda audio_path: model.transcribe(audio_path, **args),
         max_chars, max_lines, max_sub_duration, min_sub_duration
     )
 
     if srt_only:
+        if edit_srt:
+            for path, srt_path in subtitles.items():
+                print(f"Opening {srt_path} in editor for manual editing...")
+                _open_file_in_editor(srt_path, editor_cmd, verbose)
+        return
+
+    # If the user wants to manually edit SRT files before burning/embedding,
+    # open each SRT in their preferred editor and wait until it closes.
+    if edit_srt:
+        for path, srt_path in subtitles.items():
+            print(f"Opening {srt_path} in editor for manual editing...")
+            _open_file_in_editor(srt_path, editor_cmd, verbose)
+
+    if gui_enabled and subtitles:
+        items = list(subtitles.items())
+        print(f"Launching GUI on http://127.0.0.1:{gui_port} for {len(items)} files...")
+        from .gui import run as run_gui
+        run_gui(items, port=gui_port)
+        # When GUI is used for editing/burning, do not auto-burn from the CLI
+        return
+
+    if batch_mode:
+        # Batch burn all files using the requested mode: subtitle_mode
+        for path, srt_path in subtitles.items():
+            out_path = os.path.join(output_dir, f"{filename(path)}.mp4")
+            print(f"Batch burning {path}...")
+            add_subtitles_to_video(path, srt_path, out_path, verbose, mode=subtitle_mode)
         return
 
     for path, srt_path in subtitles.items():
@@ -129,186 +200,100 @@ def get_subtitles(audio_paths: dict, output_srt: bool, output_dir: str, transcri
     return subtitles_path
 
 
-def _ffmpeg_supports_subtitles() -> bool:
+
+def _open_file_in_editor(path: str, editor: Optional[str], verbose: bool = False) -> None:
+    """Open a file in the user's preferred editor and wait for it to close.
+
+    Parameters
+    ----------
+    path : str
+        Path to the file to open
+    editor : Optional[str]
+        Command to invoke editor. If None, falls back to platform defaults and
+        environment variables (EDITOR/VISUAL). If not available, falls back to
+        non-blocking open and requests user confirmation.
+    verbose : bool
+        Whether to print debug information.
     """
-    Return True if the installed 'ffmpeg' binary supports the `subtitles` filter.
-
-    This uses `ffmpeg -filters` and looks for the `subtitles` filter in the output.
-    """
-    try:
-        result = subprocess.run(
-            ["ffmpeg", "-filters"], capture_output=True, text=True, check=True
-        )
-        # case-insensitive check is safer; but ffmpeg prints lower-case
-        return "subtitles" in result.stdout
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return False
-
-
-def _run_ffmpeg_and_log(cmd: Any, verbose: bool = False):
-    """
-    Run an ffmpeg-python command and print stderr stdout on failure.
-    """
-    try:
-        # ffmpeg-python exposes `.run()` on commands; let it raise on error
-        cmd.run(capture_stdout=not verbose, capture_stderr=True, overwrite_output=True)
-    except ffmpeg.Error as e:
-        stdout = e.stdout.decode(errors="ignore") if e.stdout else ""
-        stderr = e.stderr.decode(errors="ignore") if e.stderr else ""
-        print("ffmpeg failed. stdout:")
-        if stdout:
-            print(stdout)
-        print("ffmpeg failed. stderr:")
-        if stderr:
-            print(stderr)
-        raise
-
-
-def _run_ffmpeg_cli_and_log(args: list, cwd: str | None = None, verbose: bool = False):
-    """
-    Run a raw ffmpeg CLI via subprocess and log stdout/stderr on failure.
-    """
-    if verbose:
-        print("Running ffmpeg command:", " ".join(args))
-    try:
-        # Use subprocess.run to control cwd and capture output
-        result = subprocess.run(args, capture_output=not verbose, text=True, check=True, cwd=cwd)
-        if verbose and result.stdout:
-            print(result.stdout)
-        return result
-    except subprocess.CalledProcessError as e:
-        if e.stdout:
-            print("ffmpeg failed. stdout:")
-            print(e.stdout)
-        if e.stderr:
-            print("ffmpeg failed. stderr:")
-            print(e.stderr)
-        raise
-
-
-def _quote_for_ffmpeg_filter(value: str) -> str:
-    """Return a safely quoted value for ffmpeg filter option parsing.
-
-    The ffmpeg filter parser supports quoting around option values; this
-    helper attempts a pragmatic, cross-platform quoting strategy:
-    - Prefer single quotes unless the string contains single quotes, then
-      use double quotes.
-    - If both single and double quotes appear, escape single quotes.
-    """
-    if "'" not in value:
-        return f"'{value}'"
-    if '"' not in value:
-        return f'"{value}"'
-    # Both single and double quotes present, escape single quotes
-    return "'" + value.replace("'", "\'") + "'"
-
-
-def add_subtitles_to_video(input_path: str, srt_path: str, out_path: str, verbose: bool = False, mode: str = "burn") -> None:
-    """
-    Burn subtitles into the video using ffmpeg.
-
-    Notes
-    -----
-    - Normalizes Windows paths to avoid parsing problems in the ffmpeg filter.
-    - Re-encodes to `libx264` and `aac` to avoid container compatibility issues.
-    - Captures ffmpeg stderr on failure and prints it.
-    """
-    if mode == "external":
-        # Just copy the input to out_path without hardcoding or embedding
-        # the subtitles stream. If this fails due to container issues,
-        # fall back to re-encoding.
-        try:
-            cmd = ffmpeg.input(input_path).output(out_path, vcodec="copy", acodec="copy")
-            _run_ffmpeg_and_log(cmd, verbose=verbose)
-        except ffmpeg.Error:
-            cmd = ffmpeg.input(input_path).output(out_path, vcodec="libx264", acodec="aac")
-            _run_ffmpeg_and_log(cmd, verbose=verbose)
+    if editor:
+        args = shlex.split(editor) + [path]
+        if verbose:
+            print("Running editor command:", args)
+        subprocess.run(args, check=True)
+        # Validate file after editing
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            # Ask user to confirm and possibly re-open
+            print(f"Warning: {path} is empty or missing after editing.")
+            if input("Re-open to edit? (y/N): ").lower() in ("y", "yes"):
+                _open_file_in_editor(path, editor, verbose)
         return
 
-    if not _ffmpeg_supports_subtitles() and mode == "burn":
-        print("Warning: this ffmpeg build may not support the 'subtitles' filter.")
-        print("Run 'ffmpeg -filters | findstr subtitles' to verify and install a build with libass.")
+    env_editor = os.environ.get("EDITOR") or os.environ.get("VISUAL")
+    if env_editor:
+        args = shlex.split(env_editor) + [path]
+        if verbose:
+            print("Running editor from environment:", args)
+        subprocess.run(args, check=True)
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            print(f"Warning: {path} is empty or missing after editing.")
+            if input("Re-open to edit? (y/N): ").lower() in ("y", "yes"):
+                _open_file_in_editor(path, env_editor, verbose)
+        return
 
-    # Normalize paths early using pathlib for correctness across OSes
-    input_path = str(Path(input_path).resolve())
-    out_path = str(Path(out_path).resolve())
-    srt_path = str(Path(srt_path).resolve())
+    # Platform-specific defaults
+    if sys.platform == "win32":
+        # Notepad blocks until closed
+        subprocess.run(["notepad", path], check=True)
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            print(f"Warning: {path} is empty or missing after editing.")
+            if input("Re-open to edit? (y/N): ").lower() in ("y", "yes"):
+                _open_file_in_editor(path, None, verbose)
+        return
+        return
+    elif sys.platform == "darwin":
+        # open -W waits for the app to close
+        subprocess.run(["open", "-W", path], check=True)
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            print(f"Warning: {path} is empty or missing after editing.")
+            if input("Re-open to edit? (y/N): ").lower() in ("y", "yes"):
+                _open_file_in_editor(path, None, verbose)
+        return
+        return
+    else:
+        # On Linux, prefer a terminal editor if available
+        for candidate in ("nano", "vi", "vim"):
+            if shutil.which(candidate):
+                subprocess.run([candidate, path], check=True)
+                if not os.path.exists(path) or os.path.getsize(path) == 0:
+                    print(f"Warning: {path} is empty or missing after editing.")
+                    if input("Re-open to edit? (y/N): ").lower() in ("y", "yes"):
+                        _open_file_in_editor(path, None, verbose)
+                return
+                return
+        # fallback: try xdg-open (non-blocking). Ask user to press Enter to continue
+        if shutil.which("xdg-open"):
+            subprocess.Popen(["xdg-open", path])
+            input("Press Enter when finished editing the subtitle file to continue...")
+            if not os.path.exists(path) or os.path.getsize(path) == 0:
+                print(f"Warning: {path} is empty or missing after editing.")
+                if input("Re-open to edit? (y/N): ").lower() in ("y", "yes"):
+                    _open_file_in_editor(path, None, verbose)
+            return
+            return
+        # last resort: print a message and return
+        print(f"Couldn't find an editor; please edit {path} manually and press Enter when done.")
+        input("Press Enter when finished editing the subtitle file to continue...")
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            print(f"Warning: {path} is empty or missing after editing.")
+            if input("Re-open to edit? (y/N): ").lower() in ("y", "yes"):
+                _open_file_in_editor(path, None, verbose)
+        return
 
-    # Convert path to POSIX-style for the ffmpeg filter, which expects
-    # forward slashes and may choke on Windows backslashes.
-    normalized_srt = Path(srt_path).as_posix()
-    # For debugging, print normalized srt path if verbose
-    if verbose:
-        print(f"Using subtitles file path for filter: {normalized_srt}")
 
-    video = ffmpeg.input(input_path)
-    audio = video.audio
+from .ffmpeg_utils import _ffmpeg_supports_subtitles, _run_ffmpeg_and_log, _run_ffmpeg_cli_and_log, _quote_for_ffmpeg_filter
 
-    # Pass the filename argument explicitly to avoid filter parsing issues on Windows
-    # Note: ffmpeg-python will construct the filter string for us; however
-    # ffmpeg/libass historically has issues parsing Windows drive letters
-    # and escaped colons (e.g. "C\:/..."). We try using ffmpeg-python
-    # first and fall back to a CLI invocation with a temporary working
-    # directory to avoid drive letter parsing, if necessary.
-    # Branch by mode: burn vs embed
-    if mode == "burn":
-        filtered_video = video.filter(
-            "subtitles", filename=normalized_srt, force_style="OutlineColour=&H40000000,BorderStyle=3"
-        )
-        cmd = ffmpeg.output(filtered_video, audio, out_path, vcodec="libx264", acodec="aac")
-        try:
-            _run_ffmpeg_and_log(cmd, verbose=verbose)
-        except ffmpeg.Error as e:
-            # Handle Windows path parsing failures with fallback
-            stderr = e.stderr.decode(errors="ignore") if e.stderr else ""
-            if "Unable to open" in stderr and ":\\" in srt_path:
-                # Create a short filename copy in a temp dir
-                fallback_dir = tempfile.mkdtemp()
-                fallback_srt = os.path.join(fallback_dir, os.path.basename(srt_path))
-                try:
-                    with open(srt_path, "rb") as src, open(fallback_srt, "wb") as dst:
-                        dst.write(src.read())
-                    # Run ffmpeg CLI with cwd set to the temp dir and pass a relative
-                    # filename so the filter string doesn't contain a drive letter.
-                    filter_value = _quote_for_ffmpeg_filter(os.path.basename(fallback_srt))
-                    filter_arg = f"subtitles={filter_value}"
-                    if verbose:
-                        print("Fallback ffmpeg filter string:", filter_arg)
-                    args = [
-                        "ffmpeg", "-i", input_path,
-                        "-vf", filter_arg,
-                        "-c:v", "libx264", "-c:a", "aac", out_path, "-y"
-                    ]
-                    _run_ffmpeg_cli_and_log(args, cwd=fallback_dir, verbose=verbose)
-                finally:
-                    try:
-                        os.remove(fallback_srt)
-                    except Exception:
-                        pass
-                    try:
-                        os.rmdir(fallback_dir)
-                    except Exception:
-                        pass
-            raise
 
-    elif mode == "embed":
-        # Embed SRT as a subtitle track in the container. Choose a codec
-        # for the subtitle stream depending on container.
-        ext = Path(out_path).suffix.lower()
-        if ext in [".mp4", ".mov", ".m4v"]:
-            scodec = "mov_text"
-        else:
-            # For MKV and others, use 'subrip' (SRT) codec where supported.
-            scodec = "subrip"
-
-        srt_input = ffmpeg.input(srt_path)
-        # Try to copy the existing audio/video; otherwise re-encode as fallback
-        try:
-            cmd = ffmpeg.output(video, srt_input, out_path, vcodec="copy", acodec="copy", scodec=scodec)
-            _run_ffmpeg_and_log(cmd, verbose=verbose)
-        except ffmpeg.Error:
-            cmd = ffmpeg.output(video, srt_input, out_path, vcodec="libx264", acodec="aac", scodec=scodec)
-            _run_ffmpeg_and_log(cmd, verbose=verbose)
+# add_subtitles_to_video pulled from ffmpeg_utils, use that helper instead
     # No single final run; each branch already performed the run, so nothing
     # left to do here.
 
