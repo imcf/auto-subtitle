@@ -60,6 +60,12 @@ Key options (simple explanation)
 - `--gui_port PORT` — specify the port for the GUI server (default: 5000).
 - `--batch True` — after generating SRTs, run the burn process on all videos in non-interactive batch mode.
 
+GUI features: auto-reload & sync
+- Auto-reload: When editing in the GUI, you can enable "Auto-reload after save" to immediately reload the VTT track in the player and update the parsed segments list.
+- Sync options: Two toggles allow sync in either direction:
+    - Video → Subtitles: as the video plays or is sought, the matching subtitle line is highlighted and the subtitle editor/list scrolls to it;
+    - Subtitles → Video: click a subtitle in the list or click inside the SRT textarea and the video will seek to that subtitle's start time (works when the sync toggle is enabled).
+
 Subtitle formatting & split behavior
 
 - `--max_chars_per_line N` — maximum characters per subtitle line (word wrapped), default 42.
