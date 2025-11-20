@@ -12,14 +12,8 @@ from typing import Any, Callable, Dict, Optional
 import ffmpeg
 import whisper
 
-from .ffmpeg_utils import (
-    _ffmpeg_supports_subtitles,
-    _quote_for_ffmpeg_filter,
-    _run_ffmpeg_and_log,
-    _run_ffmpeg_cli_and_log,
-    add_subtitles_to_video,
-)
-from .utils import filename, str2bool, write_srt
+from .ffmpeg_utils import add_subtitles_to_video
+from .utils import filename, str2bool
 
 
 def main():
@@ -330,7 +324,12 @@ def main():
         for path, srt_path in subtitles.items():
             print(f"Opening {srt_path} in editor for manual editing...")
             _open_file_in_editor(srt_path, editor_cmd, verbose)
+        # Editing SRTs in the editor is complete; do not automatically
+        # launch the web GUI unless the user explicitly requested it
+        # via --gui.
 
+    # If GUI requested, launch it for interactive editing/previewing.
+    if gui_enabled and subtitles:
         items = list(subtitles.items())
         print(f"Launching GUI on http://127.0.0.1:{gui_port} for {len(items)} files...")
         from .gui import run as run_gui
@@ -507,18 +506,6 @@ def _open_file_in_editor(
             if input("Re-open to edit? (y/N): ").lower() in ("y", "yes"):
                 _open_file_in_editor(path, None, verbose)
         return
-
-
-from .ffmpeg_utils import (
-    _ffmpeg_supports_subtitles,
-    _quote_for_ffmpeg_filter,
-    _run_ffmpeg_and_log,
-    _run_ffmpeg_cli_and_log,
-)
-
-# add_subtitles_to_video pulled from ffmpeg_utils, use that helper instead
-# No single final run; each branch already performed the run, so nothing
-# left to do here.
 
 
 if __name__ == "__main__":
