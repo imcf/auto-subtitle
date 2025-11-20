@@ -1,69 +1,251 @@
-import os
-import subprocess
-import ffmpeg
-import whisper
 import argparse
+import os
 import shlex
 import shutil
+import subprocess
 import sys
-import warnings
 import tempfile
-from typing import Dict, Any, Callable, Optional
+import warnings
+from pathlib import Path
+from typing import Any, Callable, Dict, Optional
+
+import ffmpeg
+import whisper
+
 from .ffmpeg_utils import (
-    add_subtitles_to_video,
     _ffmpeg_supports_subtitles,
+    _quote_for_ffmpeg_filter,
     _run_ffmpeg_and_log,
     _run_ffmpeg_cli_and_log,
-    _quote_for_ffmpeg_filter,
+    add_subtitles_to_video,
 )
-from pathlib import Path
 from .utils import filename, str2bool, write_srt
 
 
 def main():
     parser = argparse.ArgumentParser(
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("video", nargs="*", type=str,
-                        help="paths to video files to transcribe")
-    parser.add_argument("--input_dir", type=str, default=None,
-                        help="Directory containing video files to process in batch")
-    parser.add_argument("--recursive", action='store_true', default=False,
-                        help="Recursively scan input_dir for video files")
-    parser.add_argument("--model", default="small",
-                        choices=whisper.available_models(), help="name of the Whisper model to use")
-    parser.add_argument("--output_dir", "-o", type=str,
-                        default=".", help="directory to save the outputs")
-    parser.add_argument("--output_srt", type=str2bool, default=False,
-                        help="whether to output the .srt file along with the video files")
-    parser.add_argument("--srt_only", type=str2bool, default=False,
-                        help="only generate the .srt file and not create overlayed video")
-    parser.add_argument("--subtitle_mode", type=str, default="burn", choices=["burn", "embed", "external"],
-                        help="What to do with the generated subtitles: burn (hardcode), embed (add as track), or external (create .srt only)")
-    parser.add_argument("--max_chars_per_line", type=int, default=42,
-                        help="Maximum number of characters per subtitle line (word-wrapped).")
-    parser.add_argument("--max_lines", type=int, default=2,
-                        help="Maximum number of lines per subtitle entry.")
-    parser.add_argument("--max_sub_duration", type=float, default=5.0,
-                        help="Maximum duration (seconds) per subtitle entry; longer segments will be split.")
-    parser.add_argument("--min_sub_duration", type=float, default=0.5,
-                        help="Minimum duration (seconds) per subtitle entry; too-short segments are merged.")
-    parser.add_argument("--verbose", type=str2bool, default=False,
-                        help="whether to print out the progress and debug messages")
-    parser.add_argument("--edit_srt", type=str2bool, default=False,
-                        help="Open generated SRT files for manual editing before burning/embedding.")
-    parser.add_argument("--editor", type=str, default=None,
-                        help="Editor command to use for editing SRT files. Can include args, e.g. 'code --wait'.")
-    parser.add_argument("--batch", action='store_true', default=False,
-                        help="After generating SRTs, run burn on all files in batch mode (non-interactive)")
-    parser.add_argument("--gui", type=str2bool, default=False,
-                        help="Open a local web GUI allowing subtitle editing while previewing the video")
-    parser.add_argument("--gui_port", type=int, default=5000,
-                        help="Port for the local GUI server")
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument(
+        "video", nargs="*", type=str, help="paths to video files to transcribe"
+    )
+    parser.add_argument(
+        "--input_dir",
+        type=str,
+        default=None,
+        help="Directory containing video files to process in batch",
+    )
+    parser.add_argument(
+        "--recursive",
+        action="store_true",
+        default=False,
+        help="Recursively scan input_dir for video files",
+    )
+    parser.add_argument(
+        "--model",
+        default="small",
+        choices=whisper.available_models(),
+        help="name of the Whisper model to use",
+    )
+    parser.add_argument(
+        "--output_dir",
+        "-o",
+        type=str,
+        default=".",
+        help="directory to save the outputs",
+    )
+    parser.add_argument(
+        "--output_srt",
+        type=str2bool,
+        default=False,
+        help="whether to output the .srt file along with the video files",
+    )
+    parser.add_argument(
+        "--srt_only",
+        type=str2bool,
+        default=False,
+        help="only generate the .srt file and not create overlayed video",
+    )
+    parser.add_argument(
+        "--subtitle_mode",
+        type=str,
+        default="burn",
+        choices=["burn", "embed", "external"],
+        help="What to do with the generated subtitles: burn (hardcode), embed (add as track), or external (create .srt only)",
+    )
+    parser.add_argument(
+        "--max_chars_per_line",
+        type=int,
+        default=42,
+        help="Maximum number of characters per subtitle line (word-wrapped).",
+    )
+    parser.add_argument(
+        "--max_lines",
+        type=int,
+        default=2,
+        help="Maximum number of lines per subtitle entry.",
+    )
+    parser.add_argument(
+        "--max_sub_duration",
+        type=float,
+        default=5.0,
+        help="Maximum duration (seconds) per subtitle entry; longer segments will be split.",
+    )
+    parser.add_argument(
+        "--min_sub_duration",
+        type=float,
+        default=0.5,
+        help="Minimum duration (seconds) per subtitle entry; too-short segments are merged.",
+    )
+    parser.add_argument(
+        "--verbose",
+        type=str2bool,
+        default=False,
+        help="whether to print out the progress and debug messages",
+    )
+    parser.add_argument(
+        "--edit_srt",
+        type=str2bool,
+        default=False,
+        help="Open generated SRT files for manual editing before burning/embedding.",
+    )
+    parser.add_argument(
+        "--editor",
+        type=str,
+        default=None,
+        help="Editor command to use for editing SRT files. Can include args, e.g. 'code --wait'.",
+    )
+    parser.add_argument(
+        "--batch",
+        action="store_true",
+        default=False,
+        help="After generating SRTs, run burn on all files in batch mode (non-interactive)",
+    )
+    parser.add_argument(
+        "--gui",
+        type=str2bool,
+        default=False,
+        help="Open a local web GUI allowing subtitle editing while previewing the video",
+    )
+    parser.add_argument(
+        "--gui_port", type=int, default=5000, help="Port for the local GUI server"
+    )
 
-    parser.add_argument("--task", type=str, default="transcribe", choices=[
-                        "transcribe", "translate"], help="whether to perform X->X speech recognition ('transcribe') or X->English translation ('translate')")
-    parser.add_argument("--language", type=str, default="auto", choices=["auto","af","am","ar","as","az","ba","be","bg","bn","bo","br","bs","ca","cs","cy","da","de","el","en","es","et","eu","fa","fi","fo","fr","gl","gu","ha","haw","he","hi","hr","ht","hu","hy","id","is","it","ja","jw","ka","kk","km","kn","ko","la","lb","ln","lo","lt","lv","mg","mi","mk","ml","mn","mr","ms","mt","my","ne","nl","nn","no","oc","pa","pl","ps","pt","ro","ru","sa","sd","si","sk","sl","sn","so","sq","sr","su","sv","sw","ta","te","tg","th","tk","tl","tr","tt","uk","ur","uz","vi","yi","yo","zh"],
-    help="What is the origin language of the video? If unset, it is detected automatically.")
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="transcribe",
+        choices=["transcribe", "translate"],
+        help="whether to perform X->X speech recognition ('transcribe') or X->English translation ('translate')",
+    )
+    parser.add_argument(
+        "--language",
+        type=str,
+        default="auto",
+        choices=[
+            "auto",
+            "af",
+            "am",
+            "ar",
+            "as",
+            "az",
+            "ba",
+            "be",
+            "bg",
+            "bn",
+            "bo",
+            "br",
+            "bs",
+            "ca",
+            "cs",
+            "cy",
+            "da",
+            "de",
+            "el",
+            "en",
+            "es",
+            "et",
+            "eu",
+            "fa",
+            "fi",
+            "fo",
+            "fr",
+            "gl",
+            "gu",
+            "ha",
+            "haw",
+            "he",
+            "hi",
+            "hr",
+            "ht",
+            "hu",
+            "hy",
+            "id",
+            "is",
+            "it",
+            "ja",
+            "jw",
+            "ka",
+            "kk",
+            "km",
+            "kn",
+            "ko",
+            "la",
+            "lb",
+            "ln",
+            "lo",
+            "lt",
+            "lv",
+            "mg",
+            "mi",
+            "mk",
+            "ml",
+            "mn",
+            "mr",
+            "ms",
+            "mt",
+            "my",
+            "ne",
+            "nl",
+            "nn",
+            "no",
+            "oc",
+            "pa",
+            "pl",
+            "ps",
+            "pt",
+            "ro",
+            "ru",
+            "sa",
+            "sd",
+            "si",
+            "sk",
+            "sl",
+            "sn",
+            "so",
+            "sq",
+            "sr",
+            "su",
+            "sv",
+            "sw",
+            "ta",
+            "te",
+            "tg",
+            "th",
+            "tk",
+            "tl",
+            "tr",
+            "tt",
+            "uk",
+            "ur",
+            "uz",
+            "vi",
+            "yi",
+            "yo",
+            "zh",
+        ],
+        help="What is the origin language of the video? If unset, it is detected automatically.",
+    )
 
     args = parser.parse_args().__dict__
     model_name: str = args.pop("model")
@@ -99,7 +281,8 @@ def main():
 
     if model_name.endswith(".en"):
         warnings.warn(
-            f"{model_name} is an English-only model, forcing English detection.")
+            f"{model_name} is an English-only model, forcing English detection."
+        )
         args["language"] = "en"
     # if translate task used and language argument is set, then use it
     elif language != "auto":
@@ -112,6 +295,7 @@ def main():
     if input_dir:
         # scan for supported extensions
         from pathlib import Path
+
         exts = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".mpg", ".mpeg", ".m4v"}
         p = Path(input_dir)
         if recursive:
@@ -123,8 +307,14 @@ def main():
         raise ValueError("No videos provided or found in input_dir")
     audios = get_audio(videos)
     subtitles = get_subtitles(
-        audios, output_srt or srt_only, output_dir, lambda audio_path: model.transcribe(audio_path, **args),
-        max_chars, max_lines, max_sub_duration, min_sub_duration
+        audios,
+        output_srt or srt_only,
+        output_dir,
+        lambda audio_path: model.transcribe(audio_path, **args),
+        max_chars,
+        max_lines,
+        max_sub_duration,
+        min_sub_duration,
     )
 
     if srt_only:
@@ -141,10 +331,10 @@ def main():
             print(f"Opening {srt_path} in editor for manual editing...")
             _open_file_in_editor(srt_path, editor_cmd, verbose)
 
-    if gui_enabled and subtitles:
         items = list(subtitles.items())
         print(f"Launching GUI on http://127.0.0.1:{gui_port} for {len(items)} files...")
         from .gui import run as run_gui
+
         run_gui(items, port=gui_port)
         # When GUI is used for editing/burning, do not auto-burn from the CLI
         return
@@ -154,7 +344,9 @@ def main():
         for path, srt_path in subtitles.items():
             out_path = os.path.join(output_dir, f"{filename(path)}.mp4")
             print(f"Batch burning {path}...")
-            add_subtitles_to_video(path, srt_path, out_path, verbose, mode=subtitle_mode)
+            add_subtitles_to_video(
+                path, srt_path, out_path, verbose, mode=subtitle_mode
+            )
         return
 
     for path, srt_path in subtitles.items():
@@ -176,27 +368,32 @@ def get_audio(paths):
         print(f"Extracting audio from {filename(path)}...")
         output_path = os.path.join(temp_dir, f"{filename(path)}.wav")
 
-        ffmpeg.input(path).output(
-            output_path,
-            acodec="pcm_s16le", ac=1, ar="16k"
-        ).run(quiet=True, overwrite_output=True)
+        ffmpeg.input(path).output(output_path, acodec="pcm_s16le", ac=1, ar="16k").run(
+            quiet=True, overwrite_output=True
+        )
 
         audio_paths[path] = output_path
 
     return audio_paths
 
 
-def get_subtitles(audio_paths: dict, output_srt: bool, output_dir: str, transcribe: Callable[..., Any],
-                  max_chars_per_line: int = 42, max_lines: int = 2, max_sub_duration: float = 5.0, min_sub_duration: float = 0.5) -> Dict[str, str]:
+def get_subtitles(
+    audio_paths: dict,
+    output_srt: bool,
+    output_dir: str,
+    transcribe: Callable[..., Any],
+    max_chars_per_line: int = 42,
+    max_lines: int = 2,
+    max_sub_duration: float = 5.0,
+    min_sub_duration: float = 0.5,
+) -> Dict[str, str]:
     subtitles_path = {}
 
     for path, audio_path in audio_paths.items():
         srt_path = output_dir if output_srt else tempfile.gettempdir()
         srt_path = os.path.join(srt_path, f"{filename(path)}.srt")
 
-        print(
-            f"Generating subtitles for {filename(path)}... This might take a while."
-        )
+        print(f"Generating subtitles for {filename(path)}... This might take a while.")
 
         warnings.filterwarnings("ignore")
         result = transcribe(audio_path)
@@ -204,16 +401,24 @@ def get_subtitles(audio_paths: dict, output_srt: bool, output_dir: str, transcri
 
         with open(srt_path, "w", encoding="utf-8") as srt:
             from .utils import write_srt as _write_srt
-            _write_srt(result["segments"], file=srt, max_chars_per_line=max_chars_per_line,
-                       max_lines=max_lines, max_duration=max_sub_duration, min_duration=min_sub_duration)
+
+            _write_srt(
+                result["segments"],
+                file=srt,
+                max_chars_per_line=max_chars_per_line,
+                max_lines=max_lines,
+                max_duration=max_sub_duration,
+                min_duration=min_sub_duration,
+            )
 
         subtitles_path[path] = srt_path
 
     return subtitles_path
 
 
-
-def _open_file_in_editor(path: str, editor: Optional[str], verbose: bool = False) -> None:
+def _open_file_in_editor(
+    path: str, editor: Optional[str], verbose: bool = False
+) -> None:
     """Open a file in the user's preferred editor and wait for it to close.
 
     Parameters
@@ -293,7 +498,9 @@ def _open_file_in_editor(path: str, editor: Optional[str], verbose: bool = False
             return
             return
         # last resort: print a message and return
-        print(f"Couldn't find an editor; please edit {path} manually and press Enter when done.")
+        print(
+            f"Couldn't find an editor; please edit {path} manually and press Enter when done."
+        )
         input("Press Enter when finished editing the subtitle file to continue...")
         if not os.path.exists(path) or os.path.getsize(path) == 0:
             print(f"Warning: {path} is empty or missing after editing.")
@@ -302,13 +509,17 @@ def _open_file_in_editor(path: str, editor: Optional[str], verbose: bool = False
         return
 
 
-from .ffmpeg_utils import _ffmpeg_supports_subtitles, _run_ffmpeg_and_log, _run_ffmpeg_cli_and_log, _quote_for_ffmpeg_filter
-
+from .ffmpeg_utils import (
+    _ffmpeg_supports_subtitles,
+    _quote_for_ffmpeg_filter,
+    _run_ffmpeg_and_log,
+    _run_ffmpeg_cli_and_log,
+)
 
 # add_subtitles_to_video pulled from ffmpeg_utils, use that helper instead
-    # No single final run; each branch already performed the run, so nothing
-    # left to do here.
+# No single final run; each branch already performed the run, so nothing
+# left to do here.
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
