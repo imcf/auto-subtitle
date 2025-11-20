@@ -83,6 +83,18 @@ def main():
     max_sub_duration = args.pop("max_sub_duration")
     min_sub_duration = args.pop("min_sub_duration")
 
+    if gui_enabled:
+        # Check whether Flask is available before importing the GUI module.
+        # If Flask isn't installed, fail fast with a helpful message.
+        import importlib.util
+
+        if importlib.util.find_spec("flask") is None:
+            print(
+                "Error: Flask is required to use the GUI."
+                " Install it with `pip install Flask` or `pip install .[gui]` and try again."
+            )
+            sys.exit(1)
+
     os.makedirs(output_dir, exist_ok=True)
 
     if model_name.endswith(".en"):
