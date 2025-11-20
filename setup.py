@@ -1,4 +1,4 @@
-from setuptools import setup, find_packages
+from setuptools import find_packages, setup
 
 setup(
     version="1.0",
@@ -7,11 +7,15 @@ setup(
     py_modules=["auto_subtitle"],
     author="Miguel Piedrafita",
     install_requires=[
-        'openai-whisper',
+        "openai-whisper",
+        "ffmpeg-python",
     ],
+    extras_require={
+        "gui": ["Flask"],
+    },
     description="Automatically generate and embed subtitles into your videos",
     entry_points={
-        'console_scripts': ['auto_subtitle=auto_subtitle.cli:main'],
+        "console_scripts": ["auto_subtitle=auto_subtitle.cli:main"],
     },
     include_package_data=True,
 )
