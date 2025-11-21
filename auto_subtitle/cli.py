@@ -10,7 +10,18 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 import ffmpeg
-import whisper
+try:
+    import torch
+except Exception:
+    torch = None
+try:
+    import whisper as openai_whisper
+except Exception:
+    openai_whisper = None
+try:
+    import whisperx
+except Exception:
+    whisperx = None
 
 from .ffmpeg_utils import add_subtitles_to_video
 from .utils import filename, str2bool
@@ -35,11 +46,23 @@ def main():
         default=False,
         help="Recursively scan input_dir for video files",
     )
+    model_choices = openai_whisper.available_models() if openai_whisper else [
+        "tiny",
+        "tiny.en",
+        "base",
+        "base.en",
+        "small",
+        "small.en",
+        "medium",
+        "medium.en",
+        "large",
+        "large-v2",
+    ]
     parser.add_argument(
         "--model",
         default="small",
-        choices=whisper.available_models(),
-        help="name of the Whisper model to use",
+        choices=model_choices,
+        help="name of the Whisper model to use (models available from OpenAI Whisper)",
     )
     parser.add_argument(
         "--output_dir",
@@ -134,6 +157,13 @@ def main():
         default="transcribe",
         choices=["transcribe", "translate"],
         help="whether to perform X->X speech recognition ('transcribe') or X->English translation ('translate')",
+    )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="whisperx",
+        choices=["whisperx", "openai-whisper"],
+        help="Which transcription backend to use: whisperx (alignment & faster batched inference) or openai-whisper (original whisper).",
     )
     parser.add_argument(
         "--language",
@@ -254,6 +284,7 @@ def main():
     subtitle_mode: str = args.pop("subtitle_mode")
     edit_srt: bool = args.pop("edit_srt")
     editor_cmd: str | None = args.pop("editor")
+    backend: str = args.pop("backend")
     # Legacy flags removed from the CLI.
     batch_mode: bool = args.pop("batch")
     max_chars = args.pop("max_chars_per_line")
@@ -284,12 +315,25 @@ def main():
     elif language != "auto":
         args["language"] = language
 
-    # Only load the Whisper model when we need to transcribe audio (i.e. when
+    # Only load a model when we need to transcribe audio (i.e. when
     # --srt_path is not provided); this avoids unnecessary model download when
     # the user only wants to burn/embed existing .srt files.
     model = None
+    device = "cuda" if (torch is not None and torch.cuda.is_available()) else "cpu"
     if not srt_path_arg:
-        model = whisper.load_model(model_name)
+        if backend == "whisperx":
+            if not whisperx:
+                raise ImportError("whisperx is not installed. Please install whisperx (and torch) or use --backend openai-whisper.")
+            model = whisperx.load_model(model_name, device=device)
+            if verbose:
+                print(f"Using backend 'whisperx': loaded model {model_name} on {device}")
+        else:
+            # Use the original OpenAI whisper backend
+            if not openai_whisper:
+                raise ImportError("openai-whisper (whisper) is not installed. Please install openai-whisper or use --backend whisperx.")
+            model = openai_whisper.load_model(model_name, device=device)
+            if verbose:
+                print(f"Using backend 'openai-whisper': loaded model {model_name} on {device}")
     videos = args.pop("video")
     input_dir = args.pop("input_dir")
     recursive = args.pop("recursive")
@@ -335,16 +379,67 @@ def main():
             raise ValueError(f"Provided --srt_path does not exist: {srt_path_arg}")
     else:
         audios = get_audio(videos)
-        subtitles = get_subtitles(
-            audios,
-            output_srt or srt_only,
-            output_dir,
-            lambda audio_path: model.transcribe(audio_path, **args),
-            max_chars,
-            max_lines,
-            max_sub_duration,
-            min_sub_duration,
-        )
+        if model is not None:
+            task = args.get("task") if "task" in args else "transcribe"
+            transcribe_language = language if language != "auto" else None
+
+            if backend == "whisperx":
+                def _transcribe_and_align(audio_path: str):
+                    transcribe_kwargs = {}
+                    if task:
+                        transcribe_kwargs["task"] = task
+                    if transcribe_language:
+                        transcribe_kwargs["language"] = transcribe_language
+                    # WhisperX transcribe (batched) followed by alignment
+                        audio = whisperx.load_audio(audio_path)
+                        result = model.transcribe(audio, **transcribe_kwargs)
+                    try:
+                        align_model, metadata = whisperx.load_align_model(
+                            language_code=result.get("language"), device=device
+                        )
+                        aligned_segments = whisperx.align(
+                            result["segments"], align_model, metadata, audio, device
+                        )
+                        return {"segments": aligned_segments, "language": result.get("language")}
+                    except Exception:
+                        return result
+
+                transcribe_fn = _transcribe_and_align
+            else:
+                # Original openai-whisper
+                def _openai_transcribe(audio_path: str):
+                    transcribe_kwargs = {}
+                    if task:
+                        transcribe_kwargs["task"] = task
+                    if transcribe_language:
+                        transcribe_kwargs["language"] = transcribe_language
+                    # Merge any other remaining args (e.g., temperature overrides) if present
+                    transcribe_kwargs.update({k: v for k, v in args.items() if k not in ("task", "language")})
+                    return model.transcribe(audio_path, **transcribe_kwargs)
+
+                transcribe_fn = _openai_transcribe
+
+            subtitles = get_subtitles(
+                audios,
+                output_srt or srt_only,
+                output_dir,
+                lambda audio_path: transcribe_fn(audio_path),
+                max_chars,
+                max_lines,
+                max_sub_duration,
+                min_sub_duration,
+            )
+        else:
+            subtitles = get_subtitles(
+                audios,
+                output_srt or srt_only,
+                output_dir,
+                lambda audio_path: None,
+                max_chars,
+                max_lines,
+                max_sub_duration,
+                min_sub_duration,
+            )
 
     if srt_only:
         # If requested, copy any provided SRTs into the output directory.

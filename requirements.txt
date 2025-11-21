@@ -1,3 +1,5 @@
 openai-whisper
+whisperx
+torch
 ffmpeg-python
 pytest

@@ -9,6 +9,8 @@ setup(
     install_requires=[
         "openai-whisper",
         "ffmpeg-python",
+        "whisperx",
+        "torch",
     ],
     # No extras configured
     extras_require={},

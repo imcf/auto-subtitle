@@ -1,6 +1,6 @@
 # Automatic subtitles in your videos
 
-This repository uses `ffmpeg` and [OpenAI's Whisper](https://openai.com/blog/whisper) to automatically generate and overlay subtitles on any video.
+This repository uses `ffmpeg`, [OpenAI's Whisper](https://openai.com/blog/whisper) and [whisperX](https://github.com/m-bain/whisperX) to automatically generate and overlay subtitles on any video, and uses whisperX for improved alignment and timestamp accuracy.
 
 ## Installation
 
@@ -21,6 +21,14 @@ brew install ffmpeg
 choco install ffmpeg
 ```
 
+Additionally, whisperX requires `torch` and `whisperx`. The included `requirements.txt` already adds `whisperx` and `torch`, so running:
+
+```bash
+pip install -r requirements.txt
+```
+
+should install them, but because `torch` has CPU/GPU-specific wheels you may want to install it from the official instructions at https://pytorch.org before running the above on GPU machines.
+
 ## Usage
 
 The following command will generate a `subtitled/video.mp4` file contained the input video with overlayed subtitles.
@@ -30,6 +38,12 @@ The following command will generate a `subtitled/video.mp4` file contained the i
 The default setting (which selects the `small` model) works well for transcribing English. You can optionally use a bigger model for better results (especially with other languages). The available models are `tiny`, `tiny.en`, `base`, `base.en`, `small`, `small.en`, `medium`, `medium.en`, `large`.
 
     auto_subtitle /path/to/video.mp4 --model medium
+
+Models by backend
+-----------------
+
+- OpenAI Whisper models (backend `openai-whisper`): use the set of OpenAI Whisper ASR models including `tiny`, `tiny.en`, `base`, `base.en`, `small`, `small.en`, `medium`, `medium.en`, `large`, and `large-v2`.
+- whisperX (backend `whisperx`): uses the same ASR models as above for transcription and also runs a forced alignment model for improved timestamps. Common alignment models include `WAV2VEC2_ASR_LARGE_LV60K_960H` for English; whisperX will try to pick a recommended align model automatically where available.
 
 Adding `--task translate` will translate the subtitles into English:
 
@@ -58,6 +72,7 @@ Key options (simple explanation)
 -- `--editor "command --args"` — customize editor command if you want to use VS Code or other editors (example: `--editor "code --wait"`).
 - `--batch True` — after generating SRTs, run the burn process on all videos in non-interactive batch mode.
 - `--srt_path PATH` — path to an existing `.srt` file or a directory containing `.srt` files to use instead of generating new ones. When a directory is provided, filenames should match the video basenames (e.g., `video.mp4` -> `video.srt`).
+- `--backend [whisperx|openai-whisper]` — choose the transcription backend to use for generating subtitles. Default: `whisperx`.
 
 Subtitle formatting & split behavior
 
@@ -91,6 +106,11 @@ Examples
 - Embed subtitles rather than burning them:
     ```powershell
     auto_subtitle "file.mp4" --subtitle_mode embed -o out_dir
+    ```
+
+- Use the OpenAI Whisper backend instead of whisperX:
+    ```powershell
+    auto_subtitle "file.mp4" --backend openai-whisper -o out_dir
     ```
 
 - Notes & Tips
