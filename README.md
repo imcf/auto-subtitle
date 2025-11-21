@@ -47,8 +47,8 @@ Key options (simple explanation)
 
 - `--input_dir DIR` — process all videos in a folder (common extensions: mp4, mov, mkv, avi, webm, mpg). See `--recursive` to include subfolders.
 - `--recursive` — when used with `--input_dir`, recursively scan the directory tree for videos.
-- `--output_dir, -o DIR` — where to write output files (videos & SRTs). Defaults to the current directory.
-- `--output_srt True` — write SRT files in `output_dir` besides the video files.
+- `--output_dir, -o DIR` — where to write output files (videos). Defaults to the current directory. SRT files are saved next to the original video files when `--output_srt True`.
+- `--output_srt True` — write SRT files next to the original video files (same directory), using the same basename as the video (e.g., `video.mp4` → `video.srt`).
 - `--srt_only True` — only write SRT files; do not burn/encode video outputs.
 - `--subtitle_mode [burn|embed|external]` —
     - `burn` — draw (hardcode) subtitles directly onto the video (default)
@@ -57,6 +57,7 @@ Key options (simple explanation)
 -- `--edit_srt True` — opens generated SRT files in your editor before burning/embedding, allowing manual corrections.
 -- `--editor "command --args"` — customize editor command if you want to use VS Code or other editors (example: `--editor "code --wait"`).
 - `--batch True` — after generating SRTs, run the burn process on all videos in non-interactive batch mode.
+- `--srt_path PATH` — path to an existing `.srt` file or a directory containing `.srt` files to use instead of generating new ones. When a directory is provided, filenames should match the video basenames (e.g., `video.mp4` -> `video.srt`).
 
 Subtitle formatting & split behavior
 
@@ -96,9 +97,11 @@ Examples
 
 If you plan to edit subtitles interactively, use `--edit_srt` — this opens the generated SRT file in your preferred editor for manual correction before you burn or embed.
 - If you use VS Code and want it to block until you close the file, set `--editor "code --wait"`.
+If you use Visual Studio Code and want it to block until you close the file, set `--editor "code --wait"`.
+Note: To use `code` from the command line, open VS Code and run the "Install 'code' command in PATH" command from the Command Palette (or use the Shell Command menu and follow platform instructions). Alternatively set the `EDITOR` environment variable to a GUI editor or terminal editor you have installed (e.g., `setx EDITOR "notepad"` on Windows or `export EDITOR="nano"` on Linux/macOS). The CLI will fall back to system defaults if your chosen editor command is not found.
 
 - Ensure `ffmpeg` is installed (and includes libass if you need to burn with the `subtitles` filter).
-    If you see errors such as "Unable to open C\:/..." on Windows, try using `--edit_srt` and save the SRT to a path without drive colons (or run with `--output_srt` to explicitly write the SRT to a different folder). The CLI also provides a fallback that runs `ffmpeg` from a temporary directory when path issues are detected.
+    If you see errors such as "Unable to open C\:/..." on Windows, try using `--edit_srt` and save the SRT to a path without drive colons, or instead use `--srt_path` to point to a folder with SRT files (the CLI can also accept a single `.srt` file with `--srt_path` for single-input runs). The CLI also provides a fallback that runs `ffmpeg` from a temporary directory when path issues are detected.
 
 ### Editor workflow
 
@@ -115,6 +118,22 @@ If you want an editor that blocks (so the CLI waits), set `--editor` to somethin
 - ffmpeg "Unable to open C\:/..." on Windows: this is commonly due to the subtitles filter or the path format; try moving the SRT file to a simple path (no drive colon) or run with `--output_srt` to write the file to a chosen location. The CLI also falls back to invoking `ffmpeg` from a temp directory in some cases.
 - Make sure your `ffmpeg` build includes libass if you want to burn subtitles with the `subtitles` filter (required for `--subtitle_mode burn`). If you get errors about the `subtitles` filter being missing, install a full `ffmpeg` build or use `--subtitle_mode embed` / `external` as an alternative.
 - For embedding rather than burning, `--subtitle_mode embed` creates a track that is selectable in players that support subtitle tracks (e.g., HTML5 players, VLC).
+
+### Burning an existing SRT file to a video
+
+If you already have an `.srt` file and just want to burn it into a video (hardcode the subtitles), you can do this in two ways:
+
+You can also use the `auto_subtitle` CLI directly to burn an existing `.srt` file into a video. Examples:
+
+- Single file + SRT: (burns `subtitles.srt` into `input.mp4` and writes to `out_dir`)
+```powershell
+auto_subtitle "C:\videos\input.mp4" --srt_path "C:\videos\subtitles.srt" -o "C:\videos\out_dir" --subtitle_mode burn
+```
+
+- Directory of videos + directory of .srt files: (expects `video.mp4` and `video.srt` to have same basename)
+```powershell
+auto_subtitle --input_dir "C:\videos" --srt_path "C:\videos\srts" --recursive --batch True --subtitle_mode burn
+```
 
 ### Testing & Development
 

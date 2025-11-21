@@ -52,7 +52,7 @@ def main():
         "--output_srt",
         type=str2bool,
         default=False,
-        help="whether to output the .srt file along with the video files",
+        help="whether to output the .srt file next to the original video file(s) (same basename)",
     )
     parser.add_argument(
         "--srt_only",
@@ -116,6 +116,17 @@ def main():
         help="After generating SRTs, run burn on all files in batch mode (non-interactive)",
     )
     # Use --edit_srt to open SRT files in an external editor for manual edits.
+
+    parser.add_argument(
+        "--srt_path",
+        type=str,
+        default=None,
+        help=(
+            "Path to an existing .srt file (or a directory of .srt files) to use "
+            "instead of generating a new one. When a directory is provided, the CLI "
+            "looks for files named <basename>.srt for each input video."
+        ),
+    )
 
     parser.add_argument(
         "--task",
@@ -249,6 +260,7 @@ def main():
     max_lines = args.pop("max_lines")
     max_sub_duration = args.pop("max_sub_duration")
     min_sub_duration = args.pop("min_sub_duration")
+    srt_path_arg: Optional[str] = args.pop("srt_path")
 
     # Continue CLI workflows
 
@@ -272,7 +284,12 @@ def main():
     elif language != "auto":
         args["language"] = language
 
-    model = whisper.load_model(model_name)
+    # Only load the Whisper model when we need to transcribe audio (i.e. when
+    # --srt_path is not provided); this avoids unnecessary model download when
+    # the user only wants to burn/embed existing .srt files.
+    model = None
+    if not srt_path_arg:
+        model = whisper.load_model(model_name)
     videos = args.pop("video")
     input_dir = args.pop("input_dir")
     recursive = args.pop("recursive")
@@ -289,19 +306,57 @@ def main():
         videos = vids
     if not videos:
         raise ValueError("No videos provided or found in input_dir")
-    audios = get_audio(videos)
-    subtitles = get_subtitles(
-        audios,
-        output_srt or srt_only,
-        output_dir,
-        lambda audio_path: model.transcribe(audio_path, **args),
-        max_chars,
-        max_lines,
-        max_sub_duration,
-        min_sub_duration,
-    )
+
+    # If the user gave an existing SRT path (single file or a directory with
+    # SRTs), map videos to those files and skip the transcription step.
+    subtitles: Dict[str, str]
+    if srt_path_arg:
+        from pathlib import Path
+        provided_path = Path(srt_path_arg)
+        subtitles = {}
+        if provided_path.is_file():
+            # A single SRT file can only be applied to one video input.
+            if len(videos) > 1:
+                raise ValueError(
+                    "When providing a single --srt_path file, only one input video is allowed."
+                )
+            if not provided_path.exists():
+                raise ValueError(f"SRT file not found: {srt_path_arg}")
+            subtitles[videos[0]] = str(provided_path.resolve())
+        elif provided_path.is_dir():
+            for path in videos:
+                candidate = provided_path / f"{filename(path)}.srt"
+                if not candidate.exists():
+                    raise ValueError(
+                        f"Missing SRT for video {path}; expected {candidate}"
+                    )
+                subtitles[path] = str(candidate.resolve())
+        else:
+            raise ValueError(f"Provided --srt_path does not exist: {srt_path_arg}")
+    else:
+        audios = get_audio(videos)
+        subtitles = get_subtitles(
+            audios,
+            output_srt or srt_only,
+            output_dir,
+            lambda audio_path: model.transcribe(audio_path, **args),
+            max_chars,
+            max_lines,
+            max_sub_duration,
+            min_sub_duration,
+        )
 
     if srt_only:
+        # If requested, copy any provided SRTs into the output directory.
+        if output_srt:
+            for path, srt_path in subtitles.items():
+                dst = os.path.join(os.path.dirname(path), f"{filename(path)}.srt")
+                try:
+                    if os.path.abspath(srt_path) != os.path.abspath(dst):
+                        shutil.copyfile(srt_path, dst)
+                except Exception as e:
+                    print(f"Warning: failed to copy SRT {srt_path} to {dst}: {e}")
+
         if edit_srt:
             for path, srt_path in subtitles.items():
                 print(f"Opening {srt_path} in editor for manual editing...")
@@ -315,6 +370,18 @@ def main():
             print(f"Opening {srt_path} in editor for manual editing...")
             _open_file_in_editor(srt_path, editor_cmd, verbose)
         # Editing SRTs in the editor is complete.
+
+    # If requested, copy (external) SRTs into the output directory for
+    # inspection/share/export when the CLI wasn't responsible for generating
+    # them itself.
+    if output_srt:
+        for path, srt_path in subtitles.items():
+            dst = os.path.join(os.path.dirname(path), f"{filename(path)}.srt")
+            try:
+                if os.path.abspath(srt_path) != os.path.abspath(dst):
+                    shutil.copyfile(srt_path, dst)
+            except Exception as e:
+                print(f"Warning: failed to copy SRT {srt_path} to {dst}: {e}")
 
     # Continue with CLI-based workflow (edit SRTs with --edit_srt and then
     # optionally burn/embed or export external SRT files).
@@ -370,8 +437,12 @@ def get_subtitles(
     subtitles_path = {}
 
     for path, audio_path in audio_paths.items():
-        srt_path = output_dir if output_srt else tempfile.gettempdir()
-        srt_path = os.path.join(srt_path, f"{filename(path)}.srt")
+        # Save SRT files next to the original video when --output_srt is True.
+        if output_srt:
+            srt_dir = os.path.dirname(path)
+        else:
+            srt_dir = tempfile.gettempdir()
+        srt_path = os.path.join(srt_dir, f"{filename(path)}.srt")
 
         print(f"Generating subtitles for {filename(path)}... This might take a while.")
 
@@ -379,7 +450,30 @@ def get_subtitles(
         result = transcribe(audio_path)
         warnings.filterwarnings("default")
 
-        with open(srt_path, "w", encoding="utf-8") as srt:
+        try:
+            srt_file = open(srt_path, "w", encoding="utf-8")
+        except Exception as e:
+            # Could not write next to original video (permissions, read-only FS, etc.).
+            # Fallback: try writing SRT to output_dir (if set) and then tempdir.
+            fallback_dir = output_dir or tempfile.gettempdir()
+            fallback_srt = os.path.join(fallback_dir, f"{filename(path)}.srt")
+            try:
+                os.makedirs(fallback_dir, exist_ok=True)
+                srt_file = open(fallback_srt, "w", encoding="utf-8")
+                print(
+                    f"Warning: couldn't write SRT to {srt_path} ({e}); saved to {fallback_srt} instead."
+                )
+                srt_path = fallback_srt
+            except Exception:
+                # Final fallback to temp dir
+                fallback_dir = tempfile.gettempdir()
+                fallback_srt = os.path.join(fallback_dir, f"{filename(path)}.srt")
+                srt_file = open(fallback_srt, "w", encoding="utf-8")
+                print(
+                    f"Warning: couldn't write SRT to {srt_path} or {fallback_dir}; saved to {fallback_srt} instead."
+                )
+
+        with srt_file as srt:
             from .utils import write_srt as _write_srt
 
             _write_srt(
@@ -419,10 +513,16 @@ def _open_file_in_editor(
         # Validate the first token exists on PATH to provide a helpful error
         if not shutil.which(args[0]):
             print(f"Warning: editor executable '{args[0]}' not found. Falling back to system defaults.")
+            # Use platform defaults
+            _open_file_in_editor(path, None, verbose)
+            return
         try:
             subprocess.run(args, check=True)
         except FileNotFoundError:
             print(f"Editor '{args[0]}' not found. Falling back to system defaults.")
+            # Try platform defaults
+            _open_file_in_editor(path, None, verbose)
+            return
         # Validate file after editing
         if not os.path.exists(path) or os.path.getsize(path) == 0:
             # Ask user to confirm and possibly re-open
@@ -438,18 +538,19 @@ def _open_file_in_editor(
             print("Running editor from environment:", args)
         if not shutil.which(args[0]):
             print(f"Warning: editor executable '{args[0]}' not found in the environment. Falling back to system defaults.")
+            _open_file_in_editor(path, None, verbose)
+            return
         try:
             subprocess.run(args, check=True)
         except FileNotFoundError:
             print(f"Editor '{args[0]}' not found. Falling back to system defaults.")
+            _open_file_in_editor(path, None, verbose)
+            return
         if not os.path.exists(path) or os.path.getsize(path) == 0:
             print(f"Warning: {path} is empty or missing after editing.")
             if input("Re-open to edit? (y/N): ").lower() in ("y", "yes"):
                 _open_file_in_editor(path, env_editor, verbose)
         return
-
-
-@@
 
     # Platform-specific defaults
     if sys.platform == "win32":
