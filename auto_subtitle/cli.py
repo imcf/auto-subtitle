@@ -1,28 +1,35 @@
 import argparse
-import os
-import shlex
-import shutil
-import subprocess
-import sys
-import tempfile
-import warnings
-from pathlib import Path
-from typing import Any, Callable, Dict, Optional
-
-import ffmpeg
-try:
-    import torch
-except Exception:
-    torch = None
-try:
-    import whisper as openai_whisper
-except Exception:
-    openai_whisper = None
-try:
-    import whisperx
-except Exception:
-    whisperx = None
-
+                    try:
+                        result = model.transcribe(audio_path, **transcribe_kwargs)
+                    except Exception as e:
+                        msg = str(e)
+                        print(f"Error: failed to transcribe {audio_path} with the selected backend: {e}")
+                        # If this is a CUDA runtime issue (missing DLL or CUDA
+                        # library), try falling back to CPU to continue.
+                        if ("cublas" in msg.lower() or "cuda" in msg.lower()) and device != "cpu":
+                            print("Falling back to CPU because the CUDA runtime is unavailable or misconfigured.")
+                            try:
+                                # Reload the model on CPU and retry
+                                if backend == "whisperx":
+                                    cpu_model = whisperx.load_model(model_name, device="cpu")
+                                    result = cpu_model.transcribe(audio_path, **transcribe_kwargs)
+                                else:
+                                    cpu_model = openai_whisper.load_model(model_name, device="cpu")
+                                    result = cpu_model.transcribe(audio_path, **transcribe_kwargs)
+                                # If the backend supports alignment, align on CPU too
+                                if backend == "whisperx":
+                                    align_model, metadata = whisperx.load_align_model(
+                                        language_code=result.get("language"), device="cpu"
+                                    )
+                                    aligned_segments = whisperx.align(
+                                        result["segments"], align_model, metadata, audio, "cpu"
+                                    )
+                                    return {"segments": aligned_segments, "language": result.get("language")}
+                                return result
+                            except Exception as e2:
+                                print(f"Error: failed to transcribe on CPU as fallback: {e2}")
+                                raise
+                        raise
 from .ffmpeg_utils import add_subtitles_to_video
 from .utils import filename, str2bool
 
@@ -166,6 +173,23 @@ def main():
         help="Which transcription backend to use: whisperx (alignment & faster batched inference) or openai-whisper (original whisper).",
     )
     parser.add_argument(
+        "--device",
+        type=str,
+        choices=["cpu", "cuda"],
+        default=None,
+        help="Force the device used for model inference: 'cpu' or 'cuda'. If unset, the CLI auto-detects CUDA availability.",
+    )
+    parser.add_argument(
+        "--hf_disable_symlinks",
+        type=str2bool,
+        default=None,
+        help=(
+            "If True, instruct HuggingFace Hub to disable use of symlinks for cache download "
+            "(equivalent to setting HF_HUB_DISABLE_SYMLINKS=1). If not set, the CLI will "
+            "retry automatically on Windows when symlink creation fails."
+        ),
+    )
+    parser.add_argument(
         "--language",
         type=str,
         default="auto",
@@ -285,6 +309,7 @@ def main():
     edit_srt: bool = args.pop("edit_srt")
     editor_cmd: str | None = args.pop("editor")
     backend: str = args.pop("backend")
+    hf_disable_symlinks: Optional[bool] = args.pop("hf_disable_symlinks")
     # Legacy flags removed from the CLI.
     batch_mode: bool = args.pop("batch")
     max_chars = args.pop("max_chars_per_line")
@@ -319,12 +344,47 @@ def main():
     # --srt_path is not provided); this avoids unnecessary model download when
     # the user only wants to burn/embed existing .srt files.
     model = None
-    device = "cuda" if (torch is not None and torch.cuda.is_available()) else "cpu"
+    # The `--device` flag (if provided) overrides auto-detection
+    user_device: Optional[str] = args.pop("device")
+    if user_device:
+        device = user_device
+    else:
+        device = "cuda" if (torch is not None and torch.cuda.is_available()) else "cpu"
+    # Configure HF hub symlink behavior. Either the user explicitly asked for
+    # copying (hf_disable_symlinks True), or we'll let HF hub try symlinks and
+    # only retry on error (default behavior).
+    if hf_disable_symlinks is None and sys.platform == "win32":
+        # On Windows, disable symlinks by default to avoid permission issues in
+        # environments where symlink creation is restricted.
+        hf_disable_symlinks = True
+
+    if hf_disable_symlinks:
+        os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
+
     if not srt_path_arg:
         if backend == "whisperx":
             if not whisperx:
                 raise ImportError("whisperx is not installed. Please install whisperx (and torch) or use --backend openai-whisper.")
-            model = whisperx.load_model(model_name, device=device)
+            try:
+                model = whisperx.load_model(model_name, device=device)
+            except OSError as e:
+                # Handle Windows permission errors while creating symlinks in the
+                # HF cache. When Windows does not allow symlinks for the current
+                # user, HuggingFace Hub may attempt to create symlinks and fail
+                # with WinError 1314. We can retry after forcing the hub to
+                # copy files instead of symlinking.
+                if sys.platform == "win32" and (
+                    "WinError 1314" in str(e) or "symlink" in str(e).lower()
+                ):
+                    if verbose:
+                        print(
+                            "Warning: symlink creation failed while downloading model. "
+                            "Retrying with HF_HUB_DISABLE_SYMLINKS=1 (copy files instead of symlink)."
+                        )
+                    os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
+                    model = whisperx.load_model(model_name, device=device)
+                else:
+                    raise
             if verbose:
                 print(f"Using backend 'whisperx': loaded model {model_name} on {device}")
         else:
@@ -391,8 +451,35 @@ def main():
                     if transcribe_language:
                         transcribe_kwargs["language"] = transcribe_language
                     # WhisperX transcribe (batched) followed by alignment
-                        audio = whisperx.load_audio(audio_path)
+                    audio = whisperx.load_audio(audio_path)
+                    try:
                         result = model.transcribe(audio, **transcribe_kwargs)
+                    except Exception as e:
+                        msg = str(e)
+                        print(f"Error: failed to transcribe {audio_path} with whisperX: {e}")
+                        # If this is a CUDA runtime issue (missing DLL or cuda
+                        # library), try falling back to CPU to continue.
+                        if ("cublas" in msg.lower() or "cuda" in msg.lower()) and device != "cpu":
+                            print("Falling back to CPU because the CUDA runtime is unavailable or misconfigured.")
+                            try:
+                                cpu_model = whisperx.load_model(model_name, device="cpu")
+                                result = cpu_model.transcribe(audio, **transcribe_kwargs)
+                                # Align with CPU model as well
+                                align_model, metadata = whisperx.load_align_model(
+                                    language_code=result.get("language"), device="cpu"
+                                )
+                                aligned_segments = whisperx.align(
+                                    result["segments"], align_model, metadata, audio, "cpu"
+                                )
+                                return {"segments": aligned_segments, "language": result.get("language")}
+                            except Exception as e2:
+                                print(f"Error: failed to transcribe on CPU as fallback: {e2}")
+                                raise
+                        raise
+
+                    if result is None:
+                        raise RuntimeError("whisperx returned no transcription result")
+
                     try:
                         align_model, metadata = whisperx.load_align_model(
                             language_code=result.get("language"), device=device
@@ -401,7 +488,10 @@ def main():
                             result["segments"], align_model, metadata, audio, device
                         )
                         return {"segments": aligned_segments, "language": result.get("language")}
-                    except Exception:
+                    except Exception as e:
+                        if verbose:
+                            print(f"Warning: alignment failed for {audio_path}: {e}")
+                        # Fall back to the non-aligned result
                         return result
 
                 transcribe_fn = _transcribe_and_align

@@ -121,7 +121,42 @@ If you use Visual Studio Code and want it to block until you close the file, set
 Note: To use `code` from the command line, open VS Code and run the "Install 'code' command in PATH" command from the Command Palette (or use the Shell Command menu and follow platform instructions). Alternatively set the `EDITOR` environment variable to a GUI editor or terminal editor you have installed (e.g., `setx EDITOR "notepad"` on Windows or `export EDITOR="nano"` on Linux/macOS). The CLI will fall back to system defaults if your chosen editor command is not found.
 
 - Ensure `ffmpeg` is installed (and includes libass if you need to burn with the `subtitles` filter).
-    If you see errors such as "Unable to open C\:/..." on Windows, try using `--edit_srt` and save the SRT to a path without drive colons, or instead use `--srt_path` to point to a folder with SRT files (the CLI can also accept a single `.srt` file with `--srt_path` for single-input runs). The CLI also provides a fallback that runs `ffmpeg` from a temporary directory when path issues are detected.
+        If you see errors such as "Unable to open C\:/..." on Windows, try using `--edit_srt` and save the SRT to a path without drive colons, or instead use `--srt_path` to point to a folder with SRT files (the CLI can also accept a single `.srt` file with `--srt_path` for single-input runs). The CLI also provides a fallback that runs `ffmpeg` from a temporary directory when path issues are detected.
+
+        If you get an error like "OSError: [WinError 1314]" while the CLI is downloading or loading whisper/whisperX models, it's likely due to HuggingFace Hub attempting to create symlinks in the model cache on Windows. Fixes:
+
+        - Preferred: set the environment variable to force HF Hub to copy files instead of creating symlinks; in PowerShell:
+            ```powershell
+            $env:HF_HUB_DISABLE_SYMLINKS = "1"
+            pixi run auto_subtitle ...
+            ```
+        - Alternatively, enable Windows Developer Mode or run your PowerShell as Administrator so symlinks are permitted.
+
+        - Usage in the CLI: The tool now supports a command line option to force HF Hub to copy files instead of creating symlinks. Use `--hf_disable_symlinks True` to force copying rather than symlinking. On Windows the CLI enables this by default to avoid permission errors.
+
+If you encounter an error like "Library cublas64_12.dll is not found or cannot be loaded", this means a required CUDA runtime library is missing for GPU inference. You have three options:
+
+1) Install the correct CUDA toolkit matching your torch wheel (recommended for GPU users):
+     - Check the CUDA version required by your installed PyTorch:
+         ```powershell
+         python -c "import torch; print(torch.version.cuda, torch.cuda.is_available())"
+         ```
+     - Install the CUDA toolkit matching that version (e.g., CUDA 12.8) from the NVIDIA website and make sure the CUDA `bin` path is added to your PATH.
+
+2) Force CPU inference for now (no CUDA required):
+     - You can set the environment variable (temporary session):
+         ```powershell
+         $env:CUDA_VISIBLE_DEVICES = ""
+         pixi run auto_subtitle ...
+         ```
+     - Or use the CLI option to force CPU:
+         ```powershell
+         pixi run auto_subtitle --device cpu ...
+         ```
+
+3) Install a CPU-only torch wheel or an appropriate wheel for your GPU/CUDA combination from https://pytorch.org.
+
+The CLI also includes fallback behavior: if a GPU runtime error occurs (missing `cublas` library etc.), it attempts to reload the model on CPU and continue transcription automatically (you'll see a warning and the model reload attempt in the logs). This avoids abrupt crashes in many cases.
 
 ### Editor workflow
 
