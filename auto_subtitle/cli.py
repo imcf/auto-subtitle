@@ -115,15 +115,7 @@ def main():
         default=False,
         help="After generating SRTs, run burn on all files in batch mode (non-interactive)",
     )
-    parser.add_argument(
-        "--gui",
-        type=str2bool,
-        default=False,
-        help="Open a local web GUI allowing subtitle editing while previewing the video",
-    )
-    parser.add_argument(
-        "--gui_port", type=int, default=5000, help="Port for the local GUI server"
-    )
+    # Use --edit_srt to open SRT files in an external editor for manual edits.
 
     parser.add_argument(
         "--task",
@@ -251,25 +243,23 @@ def main():
     subtitle_mode: str = args.pop("subtitle_mode")
     edit_srt: bool = args.pop("edit_srt")
     editor_cmd: str | None = args.pop("editor")
-    gui_enabled: bool = args.pop("gui")
-    gui_port: int = args.pop("gui_port")
+    # Legacy flags removed from the CLI.
     batch_mode: bool = args.pop("batch")
     max_chars = args.pop("max_chars_per_line")
     max_lines = args.pop("max_lines")
     max_sub_duration = args.pop("max_sub_duration")
     min_sub_duration = args.pop("min_sub_duration")
 
-    if gui_enabled:
-        # Check whether Flask is available before importing the GUI module.
-        # If Flask isn't installed, fail fast with a helpful message.
-        import importlib.util
+    # Continue CLI workflows
 
-        if importlib.util.find_spec("flask") is None:
-            print(
-                "Error: Flask is required to use the GUI."
-                " Install it with `pip install Flask` or `pip install .[gui]` and try again."
-            )
-            sys.exit(1)
+    # Validate that the provided --editor (if any) points to an executable on PATH.
+    if editor_cmd and not _validate_editor_cmd(editor_cmd):
+        first = shlex.split(editor_cmd)[0]
+        print(
+            f"Error: editor executable '{first}' not found in PATH."
+            " Please install it or use a different editor command, or omit --editor."
+        )
+        sys.exit(2)
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -324,19 +314,10 @@ def main():
         for path, srt_path in subtitles.items():
             print(f"Opening {srt_path} in editor for manual editing...")
             _open_file_in_editor(srt_path, editor_cmd, verbose)
-        # Editing SRTs in the editor is complete; do not automatically
-        # launch the web GUI unless the user explicitly requested it
-        # via --gui.
+        # Editing SRTs in the editor is complete.
 
-    # If GUI requested, launch it for interactive editing/previewing.
-    if gui_enabled and subtitles:
-        items = list(subtitles.items())
-        print(f"Launching GUI on http://127.0.0.1:{gui_port} for {len(items)} files...")
-        from .gui import run as run_gui
-
-        run_gui(items, port=gui_port)
-        # When GUI is used for editing/burning, do not auto-burn from the CLI
-        return
+    # Continue with CLI-based workflow (edit SRTs with --edit_srt and then
+    # optionally burn/embed or export external SRT files).
 
     if batch_mode:
         # Batch burn all files using the requested mode: subtitle_mode
@@ -435,7 +416,13 @@ def _open_file_in_editor(
         args = shlex.split(editor) + [path]
         if verbose:
             print("Running editor command:", args)
-        subprocess.run(args, check=True)
+        # Validate the first token exists on PATH to provide a helpful error
+        if not shutil.which(args[0]):
+            print(f"Warning: editor executable '{args[0]}' not found. Falling back to system defaults.")
+        try:
+            subprocess.run(args, check=True)
+        except FileNotFoundError:
+            print(f"Editor '{args[0]}' not found. Falling back to system defaults.")
         # Validate file after editing
         if not os.path.exists(path) or os.path.getsize(path) == 0:
             # Ask user to confirm and possibly re-open
@@ -449,31 +436,43 @@ def _open_file_in_editor(
         args = shlex.split(env_editor) + [path]
         if verbose:
             print("Running editor from environment:", args)
-        subprocess.run(args, check=True)
+        if not shutil.which(args[0]):
+            print(f"Warning: editor executable '{args[0]}' not found in the environment. Falling back to system defaults.")
+        try:
+            subprocess.run(args, check=True)
+        except FileNotFoundError:
+            print(f"Editor '{args[0]}' not found. Falling back to system defaults.")
         if not os.path.exists(path) or os.path.getsize(path) == 0:
             print(f"Warning: {path} is empty or missing after editing.")
             if input("Re-open to edit? (y/N): ").lower() in ("y", "yes"):
                 _open_file_in_editor(path, env_editor, verbose)
         return
 
+
+@@
+
     # Platform-specific defaults
     if sys.platform == "win32":
         # Notepad blocks until closed
-        subprocess.run(["notepad", path], check=True)
+        try:
+            subprocess.run(["notepad", path], check=True)
+        except FileNotFoundError:
+            print("Error: Notepad not found; please set --editor or EDITOR env var to an editor command.")
         if not os.path.exists(path) or os.path.getsize(path) == 0:
             print(f"Warning: {path} is empty or missing after editing.")
             if input("Re-open to edit? (y/N): ").lower() in ("y", "yes"):
                 _open_file_in_editor(path, None, verbose)
-        return
         return
     elif sys.platform == "darwin":
         # open -W waits for the app to close
-        subprocess.run(["open", "-W", path], check=True)
+        try:
+            subprocess.run(["open", "-W", path], check=True)
+        except FileNotFoundError:
+            print("Error: 'open' not found; please set --editor or EDITOR env var to an editor command.")
         if not os.path.exists(path) or os.path.getsize(path) == 0:
             print(f"Warning: {path} is empty or missing after editing.")
             if input("Re-open to edit? (y/N): ").lower() in ("y", "yes"):
                 _open_file_in_editor(path, None, verbose)
-        return
         return
     else:
         # On Linux, prefer a terminal editor if available
@@ -488,7 +487,10 @@ def _open_file_in_editor(
                 return
         # fallback: try xdg-open (non-blocking). Ask user to press Enter to continue
         if shutil.which("xdg-open"):
-            subprocess.Popen(["xdg-open", path])
+            try:
+                subprocess.Popen(["xdg-open", path])
+            except Exception:
+                print("Failed to launch xdg-open; please set --editor or EDITOR env var.")
             input("Press Enter when finished editing the subtitle file to continue...")
             if not os.path.exists(path) or os.path.getsize(path) == 0:
                 print(f"Warning: {path} is empty or missing after editing.")
@@ -506,6 +508,22 @@ def _open_file_in_editor(
             if input("Re-open to edit? (y/N): ").lower() in ("y", "yes"):
                 _open_file_in_editor(path, None, verbose)
         return
+
+
+def _validate_editor_cmd(editor_cmd: Optional[str]) -> bool:
+    """Validate that the given editor command references an existing executable.
+
+    The function checks the first token of the command (e.g. 'code' from
+    "code --wait") via `shutil.which`. Returns True if found, False if not.
+    """
+    if not editor_cmd:
+        return True
+    try:
+        first = shlex.split(editor_cmd)[0]
+    except Exception:
+        # If shlex fails, be conservative and return False
+        return False
+    return shutil.which(first) is not None
 
 
 if __name__ == "__main__":

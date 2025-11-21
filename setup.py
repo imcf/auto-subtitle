@@ -10,9 +10,8 @@ setup(
         "openai-whisper",
         "ffmpeg-python",
     ],
-    extras_require={
-        "gui": ["Flask"],
-    },
+    # No extras configured
+    extras_require={},
     description="Automatically generate and embed subtitles into your videos",
     entry_points={
         "console_scripts": ["auto_subtitle=auto_subtitle.cli:main"],

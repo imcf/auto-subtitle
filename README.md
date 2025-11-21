@@ -41,7 +41,7 @@ Run the following to view all available options:
 
 ## New options & workflows
 
-This project gained several new options and a simple web GUI that makes editing and batch processing easier.
+This project gained several new options to improve editing and batch processing.
 
 Key options (simple explanation)
 
@@ -54,10 +54,8 @@ Key options (simple explanation)
     - `burn` — draw (hardcode) subtitles directly onto the video (default)
     - `embed` — add a selectable subtitle track to the output container (mov_text or subrip)
     - `external` — do not add or burn any subtitles; just write the `.srt` file
-- `--edit_srt True` — opens generated SRT files in your editor before burning/embedding, allowing manual corrections.
-- `--editor "command --args"` — customize editor command if you want to use VS Code or other editors (example: `--editor "code --wait"`).
-- `--gui True` — launch an interactive web GUI for previewing video(s) and editing subtitles live. Supports batch lists and burning of single/all files from the UI.
-- `--gui_port PORT` — specify the port for the GUI server (default: 5000).
+-- `--edit_srt True` — opens generated SRT files in your editor before burning/embedding, allowing manual corrections.
+-- `--editor "command --args"` — customize editor command if you want to use VS Code or other editors (example: `--editor "code --wait"`).
 - `--batch True` — after generating SRTs, run the burn process on all videos in non-interactive batch mode.
 
 Subtitle formatting & split behavior
@@ -74,9 +72,9 @@ Examples
     auto_subtitle "C:\videos\file.mp4" -o out_dir
     ```
 
-- Process a directory recursively and open the GUI for preview/editing:
+- Process a directory recursively:
     ```powershell
-    auto_subtitle --input_dir "C:\videos" --recursive --gui True
+    auto_subtitle --input_dir "C:\videos" --recursive
     ```
 
 - Generate only SRTs for all videos and open them in your editor for manual corrections (VS Code example):
@@ -96,10 +94,34 @@ Examples
 
 - Notes & Tips
 
-- If you plan to edit subtitles interactively, use `--gui` — it supports a dropdown to pick any generated file, an editor textarea, Save/Reload, and buttons to Burn This / Burn All.
+If you plan to edit subtitles interactively, use `--edit_srt` — this opens the generated SRT file in your preferred editor for manual correction before you burn or embed.
 - If you use VS Code and want it to block until you close the file, set `--editor "code --wait"`.
-- Installing Flask enables the GUI. If Flask is not installed and you pass `--gui`, the CLI will show a helpful error.
-- Ensure `ffmpeg` is installed (and includes libass if you need to burn with the `subtitles` filter). If you see errors such as "Unable to open C\:/...", use the GUI and try saving the SRT to a path without drive colons or test a non-Windows path style.
+
+- Ensure `ffmpeg` is installed (and includes libass if you need to burn with the `subtitles` filter).
+    If you see errors such as "Unable to open C\:/..." on Windows, try using `--edit_srt` and save the SRT to a path without drive colons (or run with `--output_srt` to explicitly write the SRT to a different folder). The CLI also provides a fallback that runs `ffmpeg` from a temporary directory when path issues are detected.
+
+### Editor workflow
+
+When you use `--edit_srt`, the tool will open the generated `.srt` file in the editor defined by (in order):
+
+- the `--editor` argument (explicit command, e.g. `--editor "code --wait"`)
+- the `EDITOR` or `VISUAL` environment variable
+- platform defaults: on Windows it launches `notepad`, on macOS it uses `open -W`, and on Linux it prefers `nano/vi/vim` or falls back to `xdg-open`.
+
+If you want an editor that blocks (so the CLI waits), set `--editor` to something like `code --wait` for Visual Studio Code. If a specified editor command does not exist on your PATH, the CLI will print a helpful error and exit.
+
+### Troubleshooting
+
+- ffmpeg "Unable to open C\:/..." on Windows: this is commonly due to the subtitles filter or the path format; try moving the SRT file to a simple path (no drive colon) or run with `--output_srt` to write the file to a chosen location. The CLI also falls back to invoking `ffmpeg` from a temp directory in some cases.
+- Make sure your `ffmpeg` build includes libass if you want to burn subtitles with the `subtitles` filter (required for `--subtitle_mode burn`). If you get errors about the `subtitles` filter being missing, install a full `ffmpeg` build or use `--subtitle_mode embed` / `external` as an alternative.
+- For embedding rather than burning, `--subtitle_mode embed` creates a track that is selectable in players that support subtitle tracks (e.g., HTML5 players, VLC).
+
+### Testing & Development
+
+Unit tests use `pytest` and are included under `tests/`. You can run them locally after installing `pytest` (already included in `requirements.txt` for convenience):
+
+    pip install -r requirements.txt
+    python -m pytest -q
 
 Advanced: If you prefer the behavior of copying codecs, or tweaking the final naming convention for `subbed.mp4` outputs, let me know and I can add the optional flags for these.
 
