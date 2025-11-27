@@ -1,204 +1,183 @@
-# Automatic subtitles in your videos
+# auto-subtitle
 
-This repository uses `ffmpeg`, [OpenAI's Whisper](https://openai.com/blog/whisper) and [whisperX](https://github.com/m-bain/whisperX) to automatically generate and overlay subtitles on any video, and uses whisperX for improved alignment and timestamp accuracy.
+Lightweight CLI to generate and embed subtitles in video files using WhisperX and ffmpeg.
+
+## Quick Start
+
+Generate SRT and burn subtitles into an MP4:
+
+```fish
+python -m auto_subtitle.cli video.mp4 --device cuda --subtitle_mode burn -o output/
+```
+
+Use an existing SRT and embed as a track:
+
+```fish
+python -m auto_subtitle.cli video.mp4 --srt_path video.srt --subtitle_mode embed -o output/
+```
 
 ## Installation
 
-To get started, you'll need Python 3.7 or newer. Install the binary by running the following command:
+### System Requirements
 
-    pip install git+https://github.com/m1guelpf/auto-subtitle.git
+- Python 3.8+
+- ffmpeg (for audio extraction and video processing)
+- CUDA toolkit (optional, for GPU acceleration)
 
-You'll also need to install [`ffmpeg`](https://ffmpeg.org/), which is available from most package managers:
+### Install ffmpeg
 
-```bash
-# on Ubuntu or Debian
-sudo apt update && sudo apt install ffmpeg
-
-# on MacOS using Homebrew (https://brew.sh/)
-brew install ffmpeg
-
-# on Windows using Chocolatey (https://chocolatey.org/)
-choco install ffmpeg
+```fish
+sudo apt update && sudo apt install -y ffmpeg
 ```
 
-Additionally, whisperX requires `torch` and `whisperx`. The included `requirements.txt` already adds `whisperx` and `torch`, so running:
+### Install Python Dependencies
 
-```bash
+For GPU support (recommended), install PyTorch with CUDA first:
+
+```fish
+# Example for CUDA 12.8 - adjust for your system
+pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+```
+
+Then install the package:
+
+```fish
 pip install -r requirements.txt
+pip install -e .
 ```
 
-should install them, but because `torch` has CPU/GPU-specific wheels you may want to install it from the official instructions at https://pytorch.org before running the above on GPU machines.
+For CPU-only:
+
+```fish
+pip install -r requirements.txt
+pip install -e .
+```
 
 ## Usage
 
-The following command will generate a `subtitled/video.mp4` file contained the input video with overlayed subtitles.
+Basic command structure:
 
-    auto_subtitle /path/to/video.mp4 -o subtitled/
-
-The default setting (which selects the `small` model) works well for transcribing English. You can optionally use a bigger model for better results (especially with other languages). The available models are `tiny`, `tiny.en`, `base`, `base.en`, `small`, `small.en`, `medium`, `medium.en`, `large`.
-
-    auto_subtitle /path/to/video.mp4 --model medium
-
-Models by backend
------------------
-
-- OpenAI Whisper models (backend `openai-whisper`): use the set of OpenAI Whisper ASR models including `tiny`, `tiny.en`, `base`, `base.en`, `small`, `small.en`, `medium`, `medium.en`, `large`, and `large-v2`.
-- whisperX (backend `whisperx`): uses the same ASR models as above for transcription and also runs a forced alignment model for improved timestamps. Common alignment models include `WAV2VEC2_ASR_LARGE_LV60K_960H` for English; whisperX will try to pick a recommended align model automatically where available.
-
-Adding `--task translate` will translate the subtitles into English:
-
-    auto_subtitle /path/to/video.mp4 --task translate
-
-Run the following to view all available options:
-
-    auto_subtitle --help
-
-## New options & workflows
-
-This project gained several new options to improve editing and batch processing.
-
-Key options (simple explanation)
-
-- `--input_dir DIR` — process all videos in a folder (common extensions: mp4, mov, mkv, avi, webm, mpg). See `--recursive` to include subfolders.
-- `--recursive` — when used with `--input_dir`, recursively scan the directory tree for videos.
-- `--output_dir, -o DIR` — where to write output files (videos). Defaults to the current directory. SRT files are saved next to the original video files when `--output_srt True`.
-- `--output_srt True` — write SRT files next to the original video files (same directory), using the same basename as the video (e.g., `video.mp4` → `video.srt`).
-- `--srt_only True` — only write SRT files; do not burn/encode video outputs.
-- `--subtitle_mode [burn|embed|external]` —
-    - `burn` — draw (hardcode) subtitles directly onto the video (default)
-    - `embed` — add a selectable subtitle track to the output container (mov_text or subrip)
-    - `external` — do not add or burn any subtitles; just write the `.srt` file
--- `--edit_srt True` — opens generated SRT files in your editor before burning/embedding, allowing manual corrections.
--- `--editor "command --args"` — customize editor command if you want to use VS Code or other editors (example: `--editor "code --wait"`).
-- `--batch True` — after generating SRTs, run the burn process on all videos in non-interactive batch mode.
-- `--srt_path PATH` — path to an existing `.srt` file or a directory containing `.srt` files to use instead of generating new ones. When a directory is provided, filenames should match the video basenames (e.g., `video.mp4` -> `video.srt`).
-- `--backend [whisperx|openai-whisper]` — choose the transcription backend to use for generating subtitles. Default: `whisperx`.
-
-Subtitle formatting & split behavior
-
-- `--max_chars_per_line N` — maximum characters per subtitle line (word wrapped), default 42.
-- `--max_lines N` — allow up to N lines per subtitle block, default 2.
-- `--max_sub_duration X` — maximum seconds for subtitle duration; longer segments are split (default 5.0).
-- `--min_sub_duration X` — minimum seconds for a subtitle entry; too-short segments are merged with neighbors (default 0.5).
-
-Examples
-
-- Process a single file and burn subtitles (default behavior):
-    ```powershell
-    auto_subtitle "C:\videos\file.mp4" -o out_dir
-    ```
-
-- Process a directory recursively:
-    ```powershell
-    auto_subtitle --input_dir "C:\videos" --recursive
-    ```
-
-- Generate only SRTs for all videos and open them in your editor for manual corrections (VS Code example):
-    ```powershell
-    auto_subtitle --input_dir "C:\videos" --recursive --srt_only True --edit_srt True --editor "code --wait"
-    ```
-
-- Generate SRTs for all files and automatically burn them (non-interactive):
-    ```powershell
-    auto_subtitle --input_dir "C:\videos" --recursive --batch True --subtitle_mode burn
-    ```
-
-- Embed subtitles rather than burning them:
-    ```powershell
-    auto_subtitle "file.mp4" --subtitle_mode embed -o out_dir
-    ```
-
-- Use the OpenAI Whisper backend instead of whisperX:
-    ```powershell
-    auto_subtitle "file.mp4" --backend openai-whisper -o out_dir
-    ```
-
-- Notes & Tips
-
-If you plan to edit subtitles interactively, use `--edit_srt` — this opens the generated SRT file in your preferred editor for manual correction before you burn or embed.
-- If you use VS Code and want it to block until you close the file, set `--editor "code --wait"`.
-If you use Visual Studio Code and want it to block until you close the file, set `--editor "code --wait"`.
-Note: To use `code` from the command line, open VS Code and run the "Install 'code' command in PATH" command from the Command Palette (or use the Shell Command menu and follow platform instructions). Alternatively set the `EDITOR` environment variable to a GUI editor or terminal editor you have installed (e.g., `setx EDITOR "notepad"` on Windows or `export EDITOR="nano"` on Linux/macOS). The CLI will fall back to system defaults if your chosen editor command is not found.
-
-- Ensure `ffmpeg` is installed (and includes libass if you need to burn with the `subtitles` filter).
-        If you see errors such as "Unable to open C\:/..." on Windows, try using `--edit_srt` and save the SRT to a path without drive colons, or instead use `--srt_path` to point to a folder with SRT files (the CLI can also accept a single `.srt` file with `--srt_path` for single-input runs). The CLI also provides a fallback that runs `ffmpeg` from a temporary directory when path issues are detected.
-
-        If you get an error like "OSError: [WinError 1314]" while the CLI is downloading or loading whisper/whisperX models, it's likely due to HuggingFace Hub attempting to create symlinks in the model cache on Windows. Fixes:
-
-        - Preferred: set the environment variable to force HF Hub to copy files instead of creating symlinks; in PowerShell:
-            ```powershell
-            $env:HF_HUB_DISABLE_SYMLINKS = "1"
-            pixi run auto_subtitle ...
-            ```
-        - Alternatively, enable Windows Developer Mode or run your PowerShell as Administrator so symlinks are permitted.
-
-        - Usage in the CLI: The tool now supports a command line option to force HF Hub to copy files instead of creating symlinks. Use `--hf_disable_symlinks True` to force copying rather than symlinking. On Windows the CLI enables this by default to avoid permission errors.
-
-If you encounter an error like "Library cublas64_12.dll is not found or cannot be loaded", this means a required CUDA runtime library is missing for GPU inference. You have three options:
-
-1) Install the correct CUDA toolkit matching your torch wheel (recommended for GPU users):
-     - Check the CUDA version required by your installed PyTorch:
-         ```powershell
-         python -c "import torch; print(torch.version.cuda, torch.cuda.is_available())"
-         ```
-     - Install the CUDA toolkit matching that version (e.g., CUDA 12.8) from the NVIDIA website and make sure the CUDA `bin` path is added to your PATH.
-
-2) Force CPU inference for now (no CUDA required):
-     - You can set the environment variable (temporary session):
-         ```powershell
-         $env:CUDA_VISIBLE_DEVICES = ""
-         pixi run auto_subtitle ...
-         ```
-     - Or use the CLI option to force CPU:
-         ```powershell
-         pixi run auto_subtitle --device cpu ...
-         ```
-
-3) Install a CPU-only torch wheel or an appropriate wheel for your GPU/CUDA combination from https://pytorch.org.
-
-The CLI also includes fallback behavior: if a GPU runtime error occurs (missing `cublas` library etc.), it attempts to reload the model on CPU and continue transcription automatically (you'll see a warning and the model reload attempt in the logs). This avoids abrupt crashes in many cases.
-
-### Editor workflow
-
-When you use `--edit_srt`, the tool will open the generated `.srt` file in the editor defined by (in order):
-
-- the `--editor` argument (explicit command, e.g. `--editor "code --wait"`)
-- the `EDITOR` or `VISUAL` environment variable
-- platform defaults: on Windows it launches `notepad`, on macOS it uses `open -W`, and on Linux it prefers `nano/vi/vim` or falls back to `xdg-open`.
-
-If you want an editor that blocks (so the CLI waits), set `--editor` to something like `code --wait` for Visual Studio Code. If a specified editor command does not exist on your PATH, the CLI will print a helpful error and exit.
-
-### Troubleshooting
-
-- ffmpeg "Unable to open C\:/..." on Windows: this is commonly due to the subtitles filter or the path format; try moving the SRT file to a simple path (no drive colon) or run with `--output_srt` to write the file to a chosen location. The CLI also falls back to invoking `ffmpeg` from a temp directory in some cases.
-- Make sure your `ffmpeg` build includes libass if you want to burn subtitles with the `subtitles` filter (required for `--subtitle_mode burn`). If you get errors about the `subtitles` filter being missing, install a full `ffmpeg` build or use `--subtitle_mode embed` / `external` as an alternative.
-- For embedding rather than burning, `--subtitle_mode embed` creates a track that is selectable in players that support subtitle tracks (e.g., HTML5 players, VLC).
-
-### Burning an existing SRT file to a video
-
-If you already have an `.srt` file and just want to burn it into a video (hardcode the subtitles), you can do this in two ways:
-
-You can also use the `auto_subtitle` CLI directly to burn an existing `.srt` file into a video. Examples:
-
-- Single file + SRT: (burns `subtitles.srt` into `input.mp4` and writes to `out_dir`)
-```powershell
-auto_subtitle "C:\videos\input.mp4" --srt_path "C:\videos\subtitles.srt" -o "C:\videos\out_dir" --subtitle_mode burn
+```fish
+python -m auto_subtitle.cli <video_files> [options]
 ```
 
-- Directory of videos + directory of .srt files: (expects `video.mp4` and `video.srt` to have same basename)
-```powershell
-auto_subtitle --input_dir "C:\videos" --srt_path "C:\videos\srts" --recursive --batch True --subtitle_mode burn
+### Common Options
+
+- `--model <name>` - WhisperX model (default: `small`)
+- `--device <cpu|cuda>` - Processing device (default: auto-detect)
+- `--language <code>` - Language code (default: `auto`)
+- `--subtitle_mode <burn|embed|external>` - How to add subtitles
+  - `burn` - Hardcode into video (default)
+  - `embed` - Add as subtitle track
+  - `external` - Copy video without subtitles
+- `--output_dir/-o <path>` - Output directory (default: `.`)
+- `--output_srt` - Save SRT files next to videos
+- `--srt_only` - Generate SRT files only, skip video processing
+- `--edit_srt` - Open SRTs in editor before processing
+- `--editor <cmd>` - Editor command (e.g., `"code --wait"`)
+
+### Batch Processing
+
+Process multiple files:
+
+```fish
+python -m auto_subtitle.cli video1.mp4 video2.mp4 --device cuda -o output/
 ```
 
-### Testing & Development
+Process directory:
 
-Unit tests use `pytest` and are included under `tests/`. You can run them locally after installing `pytest` (already included in `requirements.txt` for convenience):
+```fish
+python -m auto_subtitle.cli --input_dir videos/ --device cuda -o output/
+```
 
-    pip install -r requirements.txt
-    python -m pytest -q
+Recursive directory scan:
 
-Advanced: If you prefer the behavior of copying codecs, or tweaking the final naming convention for `subbed.mp4` outputs, let me know and I can add the optional flags for these.
+```fish
+python -m auto_subtitle.cli --input_dir videos/ --recursive --device cuda -o output/
+```
+
+### Examples
+
+Generate SRT files only:
+
+```fish
+python -m auto_subtitle.cli video.mp4 --srt_only --output_srt
+```
+
+Edit subtitles before burning:
+
+```fish
+python -m auto_subtitle.cli video.mp4 --edit_srt --editor "nano" --subtitle_mode burn -o output/
+```
+
+Use large model with translation:
+
+```fish
+python -m auto_subtitle.cli video.mp4 --model large --task translate --device cuda -o output/
+
+### GPU accelerated subtitle burning
+
+When `--device cuda` is used, `auto-subtitle` will attempt to accelerate the video encoding step
+using NVIDIA NVENC (`h264_nvenc`) where available. Note that ffmpeg's `subtitles` filter renders
+subtitle overlays using the CPU; however, `h264_nvenc` reduces the cost of video encoding and
+significantly speeds up the overall process on supported NVIDIA GPUs.
+
+Usage example (hardware-accelerated encoding with NVENC):
+
+```fish
+python -m auto_subtitle.cli video.mp4 --device cuda --subtitle_mode burn -o output/
+```
+
+If `h264_nvenc` is not available in your ffmpeg build, `auto-subtitle` will fall back to `libx264`.
+If an NVENC-accelerated attempt fails at runtime, a fallback to CPU encoding (`libx264`) will be used
+and a warning will be printed.
+
+Note: Your system needs an ffmpeg build with NVENC (h264_nvenc) enabled for CUDA acceleration to work.
+Defaults and tuning
+-------------------
+
+By default `auto-subtitle` will encode output videos with higher quality defaults than before:
+
+- libx264: CRF=18, preset=medium, pixel format yuv420p (good visual quality, larger file sizes)
+- NVENC: preset p4, vbr_hq with CQ=19, pixel format yuv420p
+
+You can tune these values at the CLI with:
+
+```fish
+python -m auto_subtitle.cli video.mp4 --device cuda --subtitle_mode burn --crf 20 --nvenc_cq 22 -o output/
+```
+
+Lower `--crf` or `--nvenc_cq` values result in higher quality but larger files. Use higher values (e.g., 22-28) to reduce file size.
+
+On many Linux distros, the default `ffmpeg` package may be compiled without NVENC; you can either
+install a distribution-provided ffmpeg with NVENC support or compile ffmpeg from source following
+NVIDIA's documentation (e.g., enabling `--enable-nvenc` and correct CUDA SDK paths).
+```
+
+## Troubleshooting
+
+### Memory Issues
+
+If you encounter `std::bad_alloc` errors:
+
+1. Use CPU mode: `--device cpu`
+2. Use a smaller model: `--model tiny` or `--model base`
+3. Ensure sufficient RAM (8GB+ recommended for GPU, 4GB+ for CPU)
+4. Check that ffmpeg is installed correctly
+
+### GPU Issues
+
+If GPU is not detected:
+
+1. Verify CUDA installation: `nvidia-smi`
+2. Check PyTorch CUDA availability:
+
+   ```fish
+   python -c "import torch; print(torch.cuda.is_available())"
+   ```
+
+3. Reinstall PyTorch with correct CUDA version
 
 ## License
 
-This script is open-source and licensed under the MIT License. For more details, check the [LICENSE](LICENSE) file.
+See `LICENSE` file in this repository.

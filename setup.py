@@ -7,10 +7,8 @@ setup(
     py_modules=["auto_subtitle"],
     author="Miguel Piedrafita",
     install_requires=[
-        "openai-whisper",
-        "ffmpeg-python",
         "whisperx",
-        "torch",
+        "ffmpeg-python",
     ],
     # No extras configured
     extras_require={},
